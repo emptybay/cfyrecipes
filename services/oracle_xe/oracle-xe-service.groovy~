@@ -1,0 +1,291 @@
+/*******************************************************************************
+* Copyright (c) 2012 GigaSpaces Technologies Ltd. All rights reserved
+*
+* Licensed under the Apache License, Version 2.0 (the "License");
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*       http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License.
+*******************************************************************************/
+import com.gigaspaces.internal.sigar.SigarHolder;
+import java.util.concurrent.TimeUnit;
+import static JmxMonitors.*
+
+service {
+	extend "../../services/puppet"
+	name "tomcat"
+	type "WEB_SERVER"
+	
+	numInstances 1
+	elastic true
+	minAllowedInstances 1
+	maxAllowedInstances 2
+	
+	def instanceId = context.instanceId
+	
+	def portIncrement = context.isLocalCloud() ? instanceId-1 : 0
+	def currJmxPort = jmxPort + portIncrement
+	println "currJmxPort:" + currJmxPort
+	def currHttpPort = port + portIncrement
+	println "currHttpPort:" + currHttpPort
+
+
+	compute {
+		template "SMALL_UBUNTU"
+		//template "SMALL_LINUX"
+	} 
+
+	lifecycle {
+	    def tomcatPort = 8080
+		
+		startDetectionTimeoutSecs 900
+		
+		startDetection {	
+			ServiceUtils.isPortOccupied(tomcatPort)
+		}
+		
+		stopDetection {	
+			!ServiceUtils.isPortOccupied(tomcatPort)
+		}
+		
+		locator {
+			def myPids = ServiceUtils.ProcessUtils.getPidsWithMainClass("org.apache.catalina.startup.Bootstrap");
+			//def myPids = ServiceUtils.ProcessUtils.getPidsWithName("tomcat6")
+			println ":tomcat: current PIDs: ${myPids}"
+			return myPids
+		}
+		
+		postStart {
+			println "in postStart"
+			println "sudo cp -rf ${context.serviceDirectory}/HttpSession /var/lib/tomcat6/webapps/"
+			def proc = "sudo cp -rf ${context.serviceDirectory}/HttpSession /var/lib/tomcat6/webapps/".execute()
+			proc.waitFor();
+			proc = "sudo mkdir /var/lib/tomcat6/webapps/HttpSession/logs".execute()
+			proc.waitFor();
+			proc = "sudo chmod 777 /var/lib/tomcat6/webapps/HttpSession/logs".execute()
+			proc.waitFor();
+			println "deployed HttpSession app"
+		
+			println "tomcat-service.groovy: tomcat Post-start ..."
+		    //def apacheService = context.waitForService("apacheLB", 180, TimeUnit.SECONDS)
+			//println "tomcat-service.groovy: invoking add-node of apacheLB ..."
+			
+			def privateIP = context.privateAddress
+			println "tomcat-service.groovy: privateIP is ${privateIP} ..."
+			
+			def currURL="http://${privateIP}:${currHttpPort}/HttpSession"
+			println "tomcat-service.groovy: About to add ${currURL} to apacheLB ..."
+			//apacheService.invoke("addNode", currURL as String, instanceId as String)
+			println "tomcat-service.groovy: tomcat Post-start ended"
+			
+		}
+		
+		monitors {
+		    def contextPath = ""
+			//def contextPath = context.attributes.thisInstance["contextPath"]
+			println "Start Monitors"
+			def privateIP = context.privateAddress
+			println "privateIP:" + privateIP
+			if (contextPath == 'ROOT') contextPath="" // ROOT means "" by convention in Tomcat
+			def metricNamesToMBeansNames = [
+				//"Current Http Threads Busy": ["Catalina:type=ThreadPool,name=\"http-bio-${currHttpPort}\"", "currentThreadsBusy"],
+				//"Current Http Thread Count": ["Catalina:type=ThreadPool,name=\"http-bio-${currHttpPort}\"", "currentThreadCount"],
+				"Current Http Threads Busy": ["Catalina:type=ThreadPool,name=http-${currHttpPort}", "currentThreadsBusy"],
+				//"Current Http Thread Count": ["Catalina:type=ThreadPool,name=\"http-${currHttpPort}\"", "currentThreadCount"],
+				"Current Http Thread Count": ["Catalina:name=http-8080,type=ThreadPool", "currentThreadCount"],
+				"Backlog": ["Catalina:type=ProtocolHandler,port=${currHttpPort}", "backlog"],
+				"Total Requests Count": ["Catalina:type=GlobalRequestProcessor,name=http-${currHttpPort}", "requestCount"],
+				"Active Sessions": ["Catalina:type=Manager,context=/${contextPath},host=localhost", "activeSessions"],
+			]
+			def jmxMap = getJmxMetrics("127.0.0.1",currJmxPort,metricNamesToMBeansNames)
+			jmxMap.each{ k, v -> println "${k}:${v}" }
+			def jmxMap2 = getJmxMetrics("${privateIP}",currJmxPort,metricNamesToMBeansNames)
+			jmxMap2.each{ k, v -> println "${k}:${v}" }
+			return getJmxMetrics("${privateIP}",currJmxPort,metricNamesToMBeansNames)
+		}
+		
+		/*
+		monitors {
+				def contextPath = "HttpSession"
+			//def contextPath = context.attributes.thisInstance["contextPath"]
+				if (contextPath == 'ROOT') contextPath="" // ROOT means "" by convention in Tomcat
+				def metricNamesToMBeansNames = [
+					"Current Http Threads Busy": ["Catalina:type=ThreadPool,name=\"http-bio-${currHttpPort}\"", "currentThreadsBusy"],
+					"Current Http Thread Count": ["Catalina:type=ThreadPool,name=\"http-bio-${currHttpPort}\"", "currentThreadCount"],
+					"Backlog": ["Catalina:type=ProtocolHandler,port=${currHttpPort}", "backlog"],
+					"Total Requests Count": ["Catalina:type=GlobalRequestProcessor,name=\"http-bio-${currHttpPort}\"", "requestCount"],
+					"Active Sessions": ["Catalina:type=Manager,context=/${contextPath},host=localhost", "activeSessions"],
+				]
+				println "getJmxMetrics " + 
+				return getJmxMetrics("127.0.0.1",currJmxPort,metricNamesToMBeansNames)
+                def cpu1 = SigarHolder.getSigar().getCpu();
+				def totalCpuTimeT1 = cpu1.getTotal()
+				def workCpuTimeT1 = cpu1.getUser() + cpu1.getNice() + cpu1.getSys()
+				
+				sleep 1000
+				
+				def cpu2 = SigarHolder.getSigar().getCpu();
+				def totalCpuTimeT2 = cpu2.getTotal()
+				def workCpuTimeT2 = cpu2.getUser() + cpu2.getNice() + cpu2.getSys()
+				
+				def totalDiff = totalCpuTimeT2-totalCpuTimeT1
+				def workDiff = workCpuTimeT2-workCpuTimeT1
+				
+				cpuLoad = (workDiff/totalDiff)*100
+				
+				println "cpuLoad is " + cpuLoad
+                                                                
+                return ["Total Machine Cpu Load" : cpuLoad]
+        }		
+		*/
+	}
+	
+	userInterface {
+		
+		metricGroups = ([
+			metricGroup {
+				name "process"
+				metrics([
+				    "Total Process Cpu Time",
+					"Process Cpu Usage",
+					"Total Process Virtual Memory",
+					"Num Of Active Threads"
+				])
+			} ,
+			metricGroup {
+				name "http"
+				metrics([
+					"Total Machine Cpu Load",
+					//"Current Http Threads Busy",
+					"Current Http Thread Count",
+					"Backlog",
+					"Total Requests Count"
+				])
+			} ,
+
+		])
+
+		widgetGroups = ([
+			widgetGroup {
+				name "Process Cpu Usage"
+				widgets ([
+					balanceGauge{metric = "Process Cpu Usage"},
+					barLineChart{
+						metric "Process Cpu Usage"
+						axisYUnit Unit.PERCENTAGE
+					}
+				])
+			} ,
+			widgetGroup {
+				name "Total Process Virtual Memory"
+				widgets([
+					balanceGauge{metric = "Total Process Virtual Memory"},
+					barLineChart {
+						metric "Total Process Virtual Memory"
+						axisYUnit Unit.MEMORY
+					}
+				])
+			} ,
+			widgetGroup {
+				name "Num Of Active Threads"
+				widgets ([
+					balanceGauge{metric = "Num Of Active Threads"},
+					barLineChart{
+						metric "Num Of Active Threads"
+						axisYUnit Unit.REGULAR
+					}
+				])
+			} ,
+			widgetGroup {
+				name "Current Http Threads Busy"
+				widgets([
+					balanceGauge{metric = "Current Http Threads Busy"},
+					barLineChart {
+						metric "Current Http Threads Busy"
+						axisYUnit Unit.REGULAR
+					}
+				])
+			} ,
+			widgetGroup {
+				name "Current Http Thread Count"
+				widgets([
+					balanceGauge{metric = "Current Http Thread Count"},
+					barLineChart {
+						metric "Current Http Thread Count"
+						axisYUnit Unit.REGULAR
+					}
+				])
+			} ,
+			widgetGroup {
+				name "Request Backlog"
+				widgets([
+					balanceGauge{metric = "Backlog"},
+					barLineChart {
+						metric "Backlog"
+						axisYUnit Unit.REGULAR
+					}
+				])
+			} ,
+			widgetGroup {
+				name "Active Sessions"
+				widgets([
+					balanceGauge{metric = "Active Sessions"},
+					barLineChart {
+						metric "Active Sessions"
+						axisYUnit Unit.REGULAR
+					}
+				])
+			} ,
+			widgetGroup {
+				name "Total Requests Count"
+				widgets([
+					balanceGauge{metric = "Total Requests Count"},
+					barLineChart {
+						metric "Total Requests Count"
+						axisYUnit Unit.REGULAR
+					}
+				])
+			} ,
+			widgetGroup {
+				name "Total Process Cpu Time"
+				widgets([
+					balanceGauge{metric = "Total Process Cpu Time"},
+					barLineChart {
+						metric "Total Process Cpu Time"
+						axisYUnit Unit.REGULAR
+					}
+				])
+			}
+		])
+	}
+	
+	scaleCooldownInSeconds 300
+	samplingPeriodInSeconds 1
+
+	scalingRules ([
+		scalingRule {
+
+			serviceStatistics {
+				metric "Num Of Active Threads"
+				statistics Statistics.maximumOfMaximums
+				movingTimeRangeInSeconds 20
+			}
+
+			highThreshold {
+				value 5
+				instancesIncrease 1
+			}
+
+			lowThreshold {
+				value 1
+				instancesDecrease 1
+			}
+		}
+	])
+}
